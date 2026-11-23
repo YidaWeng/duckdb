@@ -1,0 +1,103 @@
+# name: test/sql/copy/parquet/parquet_glob_timestamp_units.test
+# description: maximum_sample_files combines the schemas of the sampled files instead of typing a parquet glob from its first file
+# group: [parquet]
+
+require parquet
+
+require icu
+
+statement ok
+SET TimeZone = 'UTC'
+
+statement ok
+COPY (SELECT TIMESTAMPTZ '2025-12-31 00:00:00.123456+00' AS ts) TO '{TEST_DIR}/ts_2025-12-31.parquet' (FORMAT parquet)
+
+statement ok
+COPY (SELECT TIMESTAMPTZ_NS '2026-01-01 00:00:00.123456789+00' AS ts) TO '{TEST_DIR}/ts_2026-01-01.parquet' (FORMAT parquet)
+
+statement ok
+COPY (SELECT TIMESTAMPTZ '2026-01-02 00:00:00.123456+00' AS ts) TO '{TEST_DIR}/ts_2026-01-02.parquet' (FORMAT parquet)
+
+# by default the schema still comes from the first file, so the nanosecond value is rounded
+query II
+SELECT typeof(ts), count(*) FROM read_parquet('{TEST_DIR}/ts_*.parquet') GROUP BY 1
+----
+TIMESTAMP WITH TIME ZONE	3
+
+query I
+SELECT epoch_ns(ts) FROM read_parquet('{TEST_DIR}/ts_*.parquet') ORDER BY ts
+----
+1767139200123456000
+1767225600123457000
+1767312000123456000
+
+# sampling all files promotes the column to the nanosecond type and keeps every digit
+query II
+SELECT typeof(ts), count(*) FROM read_parquet('{TEST_DIR}/ts_*.parquet', maximum_sample_files = 3) GROUP BY 1
+----
+TIMESTAMPTZ_NS	3
+
+query I
+SELECT epoch_ns(ts) FROM read_parquet('{TEST_DIR}/ts_*.parquet', maximum_sample_files = 3) ORDER BY ts
+----
+1767139200123456000
+1767225600123456789
+1767312000123456000
+
+# sampling a single file is the default behavior
+query II
+SELECT typeof(ts), count(*) FROM read_parquet('{TEST_DIR}/ts_*.parquet', maximum_sample_files = 1) GROUP BY 1
+----
+TIMESTAMP WITH TIME ZONE	3
+
+# -1 samples every file
+query II
+SELECT typeof(ts), count(*) FROM read_parquet('{TEST_DIR}/ts_*.parquet', maximum_sample_files = -1) GROUP BY 1
+----
+TIMESTAMPTZ_NS	3
+
+statement error
+SELECT * FROM read_parquet('{TEST_DIR}/ts_*.parquet', maximum_sample_files = 0)
+----
+"maximum_sample_files" parameter must be positive
+
+# sampling combines the schemas of the sampled files like union_by_name, including their columns
+statement ok
+COPY (SELECT 42::INTEGER AS a, 43::INTEGER AS b) TO '{TEST_DIR}/columns_1.parquet' (FORMAT parquet)
+
+statement ok
+COPY (SELECT 84::INTEGER AS a, 85::INTEGER AS b, 86::INTEGER AS c) TO '{TEST_DIR}/columns_2.parquet' (FORMAT parquet)
+
+query TT
+SELECT column_name, column_type
+FROM (DESCRIBE SELECT * FROM read_parquet('{TEST_DIR}/columns_*.parquet', maximum_sample_files = 2))
+----
+a	INTEGER
+b	INTEGER
+c	INTEGER
+
+query III
+SELECT * FROM read_parquet('{TEST_DIR}/columns_*.parquet', maximum_sample_files = 2) ORDER BY a
+----
+42	43	NULL
+84	85	86
+
+# a column only some of the files have is read as NULL
+statement ok
+COPY (SELECT 1::INTEGER AS a, 2::INTEGER AS b) TO '{TEST_DIR}/missing_1.parquet' (FORMAT parquet)
+
+statement ok
+COPY (SELECT 3::INTEGER AS a) TO '{TEST_DIR}/missing_2.parquet' (FORMAT parquet)
+
+query II
+SELECT * FROM read_parquet('{TEST_DIR}/missing_*.parquet', maximum_sample_files = 2) ORDER BY a
+----
+1	2
+3	NULL
+
+# union_by_name over every file gives the same schema
+query III
+SELECT * FROM read_parquet('{TEST_DIR}/columns_*.parquet', union_by_name = true) ORDER BY a
+----
+42	43	NULL
+84	85	86
