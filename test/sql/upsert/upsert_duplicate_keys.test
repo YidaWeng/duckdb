@@ -1,0 +1,135 @@
+# name: test/sql/upsert/upsert_duplicate_keys.test
+# description: ON CONFLICT DO UPDATE and INSERT OR REPLACE reject a conflict key that occurs more than once in the input
+# group: [upsert]
+
+statement ok
+CREATE TABLE t(k INTEGER PRIMARY KEY, v INTEGER);
+
+statement ok
+INSERT INTO t VALUES (1, 0);
+
+# A duplicate key that is already in the table - only one of the rows could be applied, so the statement is rejected
+statement error
+INSERT OR REPLACE INTO t VALUES (1, 10), (1, 20);
+----
+INSERT OR REPLACE can not replace the same row twice in the same command
+
+statement error
+INSERT INTO t VALUES (1, 10), (1, 20) ON CONFLICT DO UPDATE SET v = excluded.v;
+----
+ON CONFLICT DO UPDATE can not update the same row twice in the same command
+
+statement error
+INSERT INTO t VALUES (1, 5), (1, 6) ON CONFLICT DO UPDATE SET v = t.v + excluded.v;
+----
+ON CONFLICT DO UPDATE can not update the same row twice in the same command
+
+# Nothing was applied by the rejected statements
+query II
+SELECT * FROM t;
+----
+1	0
+
+# A duplicate key that is not in the table yet is rejected as well
+statement error
+INSERT OR REPLACE INTO t VALUES (4, 10), (4, 20), (4, 30);
+----
+INSERT OR REPLACE can not replace the same row twice in the same command
+
+statement error
+INSERT INTO t VALUES (3, 10), (3, 20) ON CONFLICT DO UPDATE SET v = excluded.v;
+----
+ON CONFLICT DO UPDATE can not update the same row twice in the same command
+
+query II
+SELECT * FROM t;
+----
+1	0
+
+# The same holds for large inputs
+statement error
+INSERT INTO t SELECT 1, 1 FROM range(1000) ON CONFLICT DO UPDATE SET v = t.v + excluded.v;
+----
+ON CONFLICT DO UPDATE can not update the same row twice in the same command
+
+statement error
+INSERT INTO t SELECT 5, i FROM range(1, 5000) r(i) ON CONFLICT DO UPDATE SET v = excluded.v;
+----
+ON CONFLICT DO UPDATE can not update the same row twice in the same command
+
+# Without duplicate keys the increments accumulate per statement
+statement ok
+INSERT INTO t VALUES (1, 1) ON CONFLICT DO UPDATE SET v = t.v + excluded.v;
+
+statement ok
+INSERT INTO t VALUES (1, 2) ON CONFLICT DO UPDATE SET v = t.v + excluded.v;
+
+query II
+SELECT * FROM t;
+----
+1	3
+
+# A conflict target can be given explicitly
+statement error
+INSERT INTO t VALUES (1, 10), (1, 20) ON CONFLICT (k) DO UPDATE SET v = excluded.v;
+----
+ON CONFLICT DO UPDATE can not update the same row twice in the same command
+
+# DO NOTHING accepts duplicate keys - every row that finds a conflict is a no-op
+statement ok
+INSERT INTO t VALUES (1, 10), (1, 20), (7, 1), (7, 2) ON CONFLICT DO NOTHING;
+
+query II
+SELECT * FROM t ORDER BY k;
+----
+1	3
+7	1
+
+# Rows with a NULL conflict key never conflict, so they are not duplicates of one another
+statement ok
+CREATE TABLE n(k INTEGER UNIQUE, v INTEGER);
+
+statement ok
+INSERT INTO n VALUES (NULL, 1), (NULL, 2) ON CONFLICT DO UPDATE SET v = excluded.v;
+
+query II
+SELECT * FROM n ORDER BY v;
+----
+NULL	1
+NULL	2
+
+# A composite key is checked as a whole
+statement ok
+CREATE TABLE c(a INTEGER, b INTEGER, v INTEGER, PRIMARY KEY(a, b));
+
+statement error
+INSERT INTO c VALUES (1, 1, 5), (1, 1, 6) ON CONFLICT DO UPDATE SET v = excluded.v;
+----
+ON CONFLICT DO UPDATE can not update the same row twice in the same command
+
+statement ok
+INSERT INTO c VALUES (1, 1, 5), (1, 2, 5) ON CONFLICT DO UPDATE SET v = excluded.v;
+
+query III
+SELECT * FROM c ORDER BY a, b;
+----
+1	1	5
+1	2	5
+
+# An explicit conflict target also checks only that key
+statement ok
+CREATE TABLE two_keys(a INTEGER UNIQUE, b INTEGER UNIQUE, v INTEGER);
+
+statement error
+INSERT INTO two_keys VALUES (1, 1, 5), (1, 2, 6) ON CONFLICT (a) DO UPDATE SET v = excluded.v;
+----
+ON CONFLICT DO UPDATE can not update the same row twice in the same command
+
+statement ok
+INSERT INTO two_keys VALUES (1, 1, 5), (2, 2, 6) ON CONFLICT (a) DO UPDATE SET v = excluded.v;
+
+query III
+SELECT * FROM two_keys ORDER BY a;
+----
+1	1	5
+2	2	6

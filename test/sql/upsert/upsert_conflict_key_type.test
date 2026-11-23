@@ -160,7 +160,13 @@ statement ok
 INSERT INTO t8 VALUES ('A', 0);
 
 statement ok
+INSERT INTO t8 SELECT 'a', 1 ON CONFLICT DO UPDATE SET n = excluded.n;
+
+# duplicate keys are compared with the collation inside the source as well
+statement error
 INSERT INTO t8 SELECT 'a', 1 UNION ALL SELECT 'A', 1 ON CONFLICT DO UPDATE SET n = excluded.n;
+----
+ON CONFLICT DO UPDATE can not update the same row twice in the same command
 
 statement ok
 INSERT INTO t8 SELECT 'b'::BLOB, 2 UNION ALL SELECT 'B'::BLOB, 2 ON CONFLICT DO NOTHING;
@@ -169,7 +175,13 @@ statement ok
 INSERT OR IGNORE INTO t8 SELECT 'c', 3 UNION ALL SELECT 'C', 3;
 
 statement ok
+INSERT OR REPLACE INTO t8 SELECT 'd', 4;
+
+# INSERT OR REPLACE rejects duplicate keys in its source as well
+statement error
 INSERT OR REPLACE INTO t8 SELECT 'd', 4 UNION ALL SELECT 'D', 4;
+----
+INSERT OR REPLACE can not replace the same row twice in the same command
 
 statement ok
 INSERT INTO t8 SELECT 'Q', 5 ON CONFLICT DO NOTHING;

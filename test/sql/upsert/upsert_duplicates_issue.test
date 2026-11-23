@@ -6,9 +6,18 @@ require parquet
 statement ok
 CREATE TABLE tmp_edges(from_v VARCHAR, to_v VARCHAR, PRIMARY KEY(from_v, to_v));
 
-statement ok
+# The file contains the same primary key more than once. MERGE cannot apply the rows in order, so it rejects them
+# instead of silently keeping one of them and losing the others.
+statement error
 INSERT INTO tmp_edges
     from '{DATA_DIR}/parquet-testing/upsert_bug.parquet'
     ON CONFLICT DO UPDATE SET
         from_v = excluded.from_v
 ;
+----
+ON CONFLICT DO UPDATE can not update the same row twice in the same command
+
+query I
+SELECT count(*) FROM tmp_edges
+----
+0

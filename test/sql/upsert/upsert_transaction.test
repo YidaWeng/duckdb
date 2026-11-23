@@ -68,12 +68,14 @@ statement ok
 INSERT INTO tbl VALUES
 	(5, 0)
 
-statement ok
+statement error
 insert into tbl VALUES
 	(5, 0),
 	(5, 1)
 ON CONFLICT (a) DO UPDATE SET
 	b = excluded.b;
+----
+ON CONFLICT DO UPDATE can not update the same row twice in the same command
 
 statement ok
 COMMIT;

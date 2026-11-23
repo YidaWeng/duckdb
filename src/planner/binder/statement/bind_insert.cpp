@@ -8,6 +8,7 @@
 #include "duckdb/parser/expression/conjunction_expression.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/expression/function_expression.hpp"
+#include "duckdb/parser/expression/window_expression.hpp"
 #include "duckdb/parser/statement/insert_statement.hpp"
 #include "duckdb/parser/query_node/insert_query_node.hpp"
 #include "duckdb/parser/statement/merge_into_statement.hpp"
@@ -594,14 +595,19 @@ unique_ptr<MergeIntoStatement> Binder::GenerateMergeInto(InsertQueryNode &node, 
 		source = make_uniq<SubqueryRef>(std::move(cast_stmt), "excluded");
 	}
 
-	// push DISTINCT ON(unique_columns)
-	for (auto &distinct_on_columns : all_distinct_on_columns) {
-		auto distinct_stmt = make_uniq<SelectStatement>();
-		auto select_node = make_uniq<SelectNode>();
-		auto distinct = make_uniq<DistinctModifier>();
+	if (on_conflict_info.action_type != OnConflictAction::NOTHING) {
+		// DO UPDATE / OR REPLACE apply every row to its conflict key in turn. MERGE cannot do that - it would apply
+		// just one of the rows and silently drop the rest - so rows that share a conflict key are rejected instead.
+		// This is what PostgreSQL does as well.
+		D_ASSERT(all_distinct_on_columns.size() == 1);
+		auto &distinct_on_columns = all_distinct_on_columns[0];
+
+		auto count = make_uniq<WindowExpression>(string(), string(), "count_star");
+		count->WindowStartMutable() = WindowBoundary::UNBOUNDED_PRECEDING;
+		count->WindowEndMutable() = WindowBoundary::UNBOUNDED_FOLLOWING;
 		unique_ptr<ParsedExpression> any_key_null;
 		for (auto &col : distinct_on_columns) {
-			distinct->distinct_on_targets.push_back(make_uniq<ColumnRefExpression>(col));
+			count->PartitionsMutable().push_back(make_uniq<ColumnRefExpression>(col));
 			if (IsNotNullColumn(table, col)) {
 				continue;
 			}
@@ -614,21 +620,81 @@ unique_ptr<MergeIntoStatement> Binder::GenerateMergeInto(InsertQueryNode &node, 
 				any_key_null = std::move(is_null);
 			}
 		}
-		if (any_key_null) {
-			// rows with a NULL key column never conflict (NULLs are distinct in unique indexes) - make them distinct
-			auto unique_null_key = make_uniq<CaseExpression>();
-			CaseCheck null_check;
-			null_check.when_expr = std::move(any_key_null);
-			null_check.then_expr = make_uniq<FunctionExpression>("uuid", vector<unique_ptr<ParsedExpression>>());
-			unique_null_key->CaseChecksMutable().push_back(std::move(null_check));
-			unique_null_key->ElseMutable() = ConstantExpression::FromValue(Value());
-			distinct->distinct_on_targets.push_back(std::move(unique_null_key));
+		// a conflict key may occur once - anything else would affect the same row twice
+		string error_message;
+		if (on_conflict_info.action_type == OnConflictAction::REPLACE) {
+			error_message = "INSERT OR REPLACE can not replace the same row twice in the same command.";
+		} else {
+			error_message = "ON CONFLICT DO UPDATE can not update the same row twice in the same command.";
 		}
-		select_node->modifiers.push_back(std::move(distinct));
+		error_message +=
+		    " Ensure that no rows proposed for insertion within the same command have duplicate constrained values.";
+		auto duplicate_check = make_uniq<CaseExpression>();
+		if (any_key_null) {
+			// rows with a NULL key column never conflict (NULLs are distinct in unique indexes), however often the
+			// key occurs
+			CaseCheck null_key_check;
+			null_key_check.when_expr = std::move(any_key_null);
+			null_key_check.then_expr = ConstantExpression::FromValue(Value::BOOLEAN(true));
+			duplicate_check->CaseChecksMutable().push_back(std::move(null_key_check));
+		}
+		CaseCheck single_row_check;
+		single_row_check.when_expr = make_uniq<ComparisonExpression>(ExpressionType::COMPARE_EQUAL, std::move(count),
+		                                                             ConstantExpression::FromValue(Value::BIGINT(1)));
+		single_row_check.then_expr = ConstantExpression::FromValue(Value::BOOLEAN(true));
+		duplicate_check->CaseChecksMutable().push_back(std::move(single_row_check));
+		vector<unique_ptr<ParsedExpression>> error_arguments;
+		error_arguments.push_back(ConstantExpression::FromValue(Value(error_message)));
+		duplicate_check->ElseMutable() = make_uniq<FunctionExpression>("error", std::move(error_arguments));
+
+		auto duplicate_stmt = make_uniq<SelectStatement>();
+		auto select_node = make_uniq<SelectNode>();
 		select_node->select_list.push_back(make_uniq<StarExpression>());
+		select_node->qualify = std::move(duplicate_check);
 		select_node->from_table = std::move(source);
-		distinct_stmt->node = std::move(select_node);
-		source = make_uniq<SubqueryRef>(std::move(distinct_stmt), "excluded");
+		duplicate_stmt->node = std::move(select_node);
+		source = make_uniq<SubqueryRef>(std::move(duplicate_stmt), "excluded");
+	}
+
+	// push DISTINCT ON(unique_columns)
+	// DO NOTHING leaves the input rows alone - several rows for one key are all no-ops, so one of them is enough
+	if (on_conflict_info.action_type == OnConflictAction::NOTHING) {
+		for (auto &distinct_on_columns : all_distinct_on_columns) {
+			auto distinct_stmt = make_uniq<SelectStatement>();
+			auto select_node = make_uniq<SelectNode>();
+			auto distinct = make_uniq<DistinctModifier>();
+			unique_ptr<ParsedExpression> any_key_null;
+			for (auto &col : distinct_on_columns) {
+				distinct->distinct_on_targets.push_back(make_uniq<ColumnRefExpression>(col));
+				if (IsNotNullColumn(table, col)) {
+					continue;
+				}
+				auto is_null = make_uniq<OperatorExpression>(ExpressionType::OPERATOR_IS_NULL,
+				                                             make_uniq<ColumnRefExpression>(col));
+				if (any_key_null) {
+					any_key_null = make_uniq<ConjunctionExpression>(ExpressionType::CONJUNCTION_OR,
+					                                                std::move(any_key_null), std::move(is_null));
+				} else {
+					any_key_null = std::move(is_null);
+				}
+			}
+			if (any_key_null) {
+				// rows with a NULL key column never conflict (NULLs are distinct in unique indexes) - make them
+				// distinct
+				auto unique_null_key = make_uniq<CaseExpression>();
+				CaseCheck null_check;
+				null_check.when_expr = std::move(any_key_null);
+				null_check.then_expr = make_uniq<FunctionExpression>("uuid", vector<unique_ptr<ParsedExpression>>());
+				unique_null_key->CaseChecksMutable().push_back(std::move(null_check));
+				unique_null_key->ElseMutable() = ConstantExpression::FromValue(Value());
+				distinct->distinct_on_targets.push_back(std::move(unique_null_key));
+			}
+			select_node->modifiers.push_back(std::move(distinct));
+			select_node->select_list.push_back(make_uniq<StarExpression>());
+			select_node->from_table = std::move(source);
+			distinct_stmt->node = std::move(select_node);
+			source = make_uniq<SubqueryRef>(std::move(distinct_stmt), "excluded");
+		}
 	}
 
 	merge_into->node->source = std::move(source);

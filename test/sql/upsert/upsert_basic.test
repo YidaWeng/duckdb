@@ -97,14 +97,23 @@ select * from tbl;
 3	30	1
 4	2	3
 
-# Two rows cause a conflict, on the same existing row
-# only the last one is used
+# Apply the value with a single row
 statement ok
+insert into tbl VALUES
+	(3,3,10)
+ON CONFLICT (i) DO UPDATE SET
+	k = excluded.k;
+
+# Two rows for the same conflict key in one command are rejected - applying only one of them would silently lose
+# the other, and MERGE cannot apply them in order
+statement error
 insert into tbl VALUES
 	(3,3,10),
 	(3,3,10)
 ON CONFLICT (i) DO UPDATE SET
 	k = excluded.k;
+----
+ON CONFLICT DO UPDATE can not update the same row twice in the same command
 
 query III
 select * from tbl order by all

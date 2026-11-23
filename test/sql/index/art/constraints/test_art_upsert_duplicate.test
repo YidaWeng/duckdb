@@ -12,7 +12,8 @@ CREATE TABLE hero (
 statement ok
 CREATE INDEX ix_hero_age ON hero (age);
 
-statement ok
+# The VALUES list proposes the same key twice - only one of the rows could be applied, so the statement is rejected
+statement error
 INSERT INTO hero (name, secret_name, age)
 VALUES
 	('Captain North America', 'Esteban Rogelios', 93),
@@ -23,3 +24,10 @@ VALUES
 ON CONFLICT (name) DO UPDATE
 SET	secret_name = EXCLUDED.secret_name,
 	age = EXCLUDED.age;
+----
+ON CONFLICT DO UPDATE can not update the same row twice in the same command
+
+query I
+SELECT count(*) FROM hero;
+----
+0

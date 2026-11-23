@@ -49,11 +49,8 @@ RETURNING *;
 2	not_john_doe	not_john_new@example.com
 
 
-# Here we have conflicts within the inserted data
-# Only one row per conflict key is inserted and returned. Keep duplicate
-# payloads equal, since DISTINCT ON does not specify which candidate wins.
-# The UPDATE condition does not filter newly inserted rows.
-query ITT rowsort
+# Here we have conflicts within the inserted data - the statement is rejected, and nothing is returned
+statement error
 INSERT INTO users (id, username, email)
 VALUES
 	(3, 'inner_conflict', 'test'),
@@ -70,6 +67,24 @@ ON CONFLICT (id) DO
     WHERE EXCLUDED.email != 'test'
 RETURNING *;
 ----
+ON CONFLICT DO UPDATE can not update the same row twice in the same command
+
+# The same rows without duplicate keys are inserted and returned
+query ITT rowsort
+INSERT INTO users (id, username, email)
+VALUES
+	(3, 'inner_conflict', 'test'),
+	(4, 'a', ''),
+	(5, 'b', ''),
+	(6, 'c', ''),
+	(7, 'd', ''),
+	(8, 'e', ''),
+	(9, 'f', '')
+ON CONFLICT (id) DO
+    UPDATE SET email = EXCLUDED.email
+    WHERE EXCLUDED.email != 'test'
+RETURNING *;
+----
 3	inner_conflict	test
 4	a	(empty)
 5	b	(empty)
@@ -78,9 +93,9 @@ RETURNING *;
 8	e	(empty)
 9	f	(empty)
 
-# For an existing row, duplicate input keys update and return it once.
+# A duplicate input key that conflicts with an existing row is rejected as well, and the row keeps its value.
 # Columns outside the SET clause retain their existing values.
-query ITT
+statement error
 INSERT INTO users VALUES
     (3, 'unused_username', 'updated'),
     (3, 'unused_username', 'updated')
@@ -88,24 +103,14 @@ ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email
 WHERE EXCLUDED.email != 'test'
 RETURNING *;
 ----
-3	inner_conflict	updated
-
-# A filtered update contributes no RETURNING rows, including with duplicates.
-query ITT
-INSERT INTO users VALUES
-    (3, 'unused_username', 'test'),
-    (3, 'unused_username', 'test')
-ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email
-WHERE EXCLUDED.email != 'test'
-RETURNING *;
-----
+ON CONFLICT DO UPDATE can not update the same row twice in the same command
 
 query ITT
 SELECT * FROM users ORDER BY id
 ----
 1	john_doe	john@example.com
 2	not_john_doe	not_john_new@example.com
-3	inner_conflict	updated
+3	inner_conflict	test
 4	a	(empty)
 5	b	(empty)
 6	c	(empty)
