@@ -1,0 +1,51 @@
+# name: test/sql/types/float/nan_statistics.test
+# description: NaN min/max statistics must not fold comparisons or constant-compress away the sign
+# group: [float]
+
+# min/max do not carry the sign of NaN, so a -NaN column must not be treated as a +NaN constant
+statement ok
+CREATE TABLE neg_nan AS SELECT '-NaN'::DOUBLE AS d
+
+query II
+SELECT d::VARCHAR, d::VARCHAR = '-nan' FROM neg_nan
+----
+-nan	true
+
+# a NaN-only segment must not be constant-compressed to the opposite sign on checkpoint
+statement ok
+CREATE TABLE checkpoint_neg_nan AS SELECT '-NaN'::DOUBLE AS d
+
+statement ok
+CHECKPOINT
+
+query I
+SELECT d::VARCHAR FROM checkpoint_neg_nan
+----
+-nan
+
+# mixed signs must both survive a checkpoint
+statement ok
+CREATE TABLE checkpoint_mixed_nan AS
+    SELECT d FROM (VALUES ('-NaN'::DOUBLE), ('NaN'::DOUBLE)) v(d)
+
+statement ok
+CHECKPOINT
+
+query II
+SELECT count(*) FILTER (WHERE d::VARCHAR = '-nan'),
+       count(*) FILTER (WHERE d::VARCHAR = 'nan')
+FROM checkpoint_mixed_nan
+----
+1	1
+
+# +NaN-only segments must still read back as +NaN
+statement ok
+CREATE TABLE checkpoint_pos_nan AS SELECT 'NaN'::DOUBLE AS d
+
+statement ok
+CHECKPOINT
+
+query I
+SELECT d::VARCHAR FROM checkpoint_pos_nan
+----
+nan

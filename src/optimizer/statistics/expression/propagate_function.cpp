@@ -68,6 +68,10 @@ bool TryInferConstantBounds(const BaseStatistics &stats, Value &constant) {
 		return false;
 	}
 	if (stats.GetStatsType() == StatisticsType::NUMERIC_STATS && NumericStats::HasMinMax(stats)) {
+		// min/max do not capture the sign of NaN, so they cannot prove a single constant value
+		if (NumericStats::HasNaN(stats)) {
+			return false;
+		}
 		auto min = NumericStats::Min(stats);
 		auto max = NumericStats::Max(stats);
 		if (min != max || !CanInferConstantFromNumericBounds(min)) {

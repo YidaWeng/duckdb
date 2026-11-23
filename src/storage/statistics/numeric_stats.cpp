@@ -379,8 +379,26 @@ static bool ZeroSignsMatch(const BaseStatistics &stats) {
 	return min != T(0) || std::signbit(min) == std::signbit(max);
 }
 
+bool NumericStats::HasNaN(const BaseStatistics &stats) {
+	if (!NumericStats::HasMinMax(stats)) {
+		return false;
+	}
+	switch (stats.GetType().InternalType()) {
+	case PhysicalType::FLOAT:
+		return Value::IsNan(NumericStats::GetMin<float>(stats)) || Value::IsNan(NumericStats::GetMax<float>(stats));
+	case PhysicalType::DOUBLE:
+		return Value::IsNan(NumericStats::GetMin<double>(stats)) || Value::IsNan(NumericStats::GetMax<double>(stats));
+	default:
+		return false;
+	}
+}
+
 bool NumericStats::IsConstant(const BaseStatistics &stats) {
 	if (NumericStats::Max(stats) > NumericStats::Min(stats)) {
+		return false;
+	}
+	// The sign of NaN is not part of min/max, so constant compression would write one sign for every row.
+	if (NumericStats::HasNaN(stats)) {
 		return false;
 	}
 	// -0.0 == 0.0, so a zero range is only constant if both bounds have the same sign

@@ -47,6 +47,8 @@ struct NumericStats {
 	DUCKDB_API static bool IsConstant(const BaseStatistics &stats);
 	//! Returns true if the stats has both a min and max value defined
 	DUCKDB_API static bool HasMinMax(const BaseStatistics &stats);
+	//! Returns true if the stats has a NaN min or max value
+	DUCKDB_API static bool HasNaN(const BaseStatistics &stats);
 	//! Returns true if the stats has a min value defined
 	DUCKDB_API static bool HasMin(const BaseStatistics &stats);
 	//! Returns true if the stats has a max value defined
